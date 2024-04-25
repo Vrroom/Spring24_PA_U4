@@ -20,8 +20,119 @@
 </head>
 <body>
 <script type="module">
-    import {ThreeEngine} from "../js/utils/utils_three.js";
+    // Appreciate the obfuscation effort :)
+    import {ThreeEngine, get_default_lil_gui} from "../js/utils/utils_three.js";
     import {B1Z1Robot, XArm7Robot} from "../js/utils/utils_robot.js";
+    import { mul_matrix_scalar, mul_matrix_matrix, add_matrix_matrix, identity_matrix } from "../js/utils/utils_math.js";
+
+    function identity_element () {
+      return [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]];
+    }   
+
+    function so3_exp_map (x) {
+      let beta_sq = x.map((a) => a * a).reduce((a, b) => a + b); 
+      let beta = Math.sqrt(beta_sq);
+      let p, q;
+      if (beta_sq < 0.00001) {
+        p = 1.0;
+        q = 1.0;
+      } else {
+        p = Math.sin(beta) / beta; 
+        q = (1 - Math.cos(beta)) / beta_sq;
+      } 
+      let I = identity_matrix(3);
+      let A = [
+        [0, -x[2], x[1]], 
+        [x[2], 0, -x[0]],
+        [-x[1], x[0], 0]
+      ]
+      let A_sq = mul_matrix_matrix(A, A); 
+      return add_matrix_matrix(
+        I, 
+        add_matrix_matrix(
+          mul_matrix_scalar(A, p), 
+          mul_matrix_scalar(A_sq, q)
+        )
+      );
+    }
+
+    function settings_to_state (settings) { 
+      return [
+        settings.dof0, 
+        settings.dof1, 
+        settings.dof2, 
+        settings.dof3, 
+        settings.dof4, 
+        settings.dof5, 
+        settings.dof6, 
+        settings.dof7, 
+      ];
+    }
+
+    function forward_kinematics (robot, state) {
+      let joints = robot.joints;
+      let links = robot.links;
+      let kh = robot.kinematic_hierarchy;
+
+      let out_poses = [];
+
+      for (let i = 0; i < links.length; i++) {
+        out_poses.push(identity_element()); 
+      }
+
+      kh.forEach (layer => {
+        layer.forEach(link_idx => {
+          let curr_link = links[link_idx];
+          let parent_link_idx = curr_link.parent_link_idx;
+          let parent_joint_idx = curr_link.parent_joint_idx;
+          if (parent_joint_idx !== null) {
+            let curr_joint = joints[parent_joint_idx];
+            let joint_type = curr_joint.joint_type_string;
+            let curr_pose = out_poses[parent_link_idx];
+            let T_c = curr_joint.xyz_rpy_SE3_matrix;
+            curr_pose = mul_matrix_matrix(curr_pose, T_c);
+            // T_v will depend on some values in the state
+            let T_v = identity_element(); // defaults for fixed type
+            if (joint_type === 'prismatic') { 
+              T_v = [
+                [1, 0, 0, state[curr_joint.dof_idx] * curr_joint.axis[0][0]],
+                [0, 1, 0, state[curr_joint.dof_idx] * curr_joint.axis[1][0]],
+                [0, 0, 1, state[curr_joint.dof_idx] * curr_joint.axis[2][0]],
+                [0, 0, 0, 1],
+              ]; 
+            } else if (joint_type === 'revolute') {
+              let theta = state[curr_joint.dof_idx];  
+              let frak_so3_coords = curr_joint.axis.map((x) => theta * x[0])
+              let R = so3_exp_map(frak_so3_coords);
+              T_v = [
+                [R[0][0], R[0][1], R[0][2], 0.0], 
+                [R[1][0], R[1][1], R[1][2], 0.0], 
+                [R[2][0], R[2][1], R[2][2], 0.0], 
+                [    0.0,     0.0,     0.0, 1.0], 
+              ]; 
+            } else if (joint_type === 'floating') {
+              let rot_coords = curr_joint.rotation_dof_idxs.map(i => state[i]); 
+              let tra_coords = curr_joint.translation_dof_idxs.map(i => state[i]); 
+              let R = so3_exp_map(rot_coords);
+              T_v = [
+                [R[0][0], R[0][1], R[0][2], tra_coords[0]], 
+                [R[1][0], R[1][1], R[1][2], tra_coords[1]], 
+                [R[2][0], R[2][1], R[2][2], tra_coords[2]], 
+                [    0.0,     0.0,     0.0,           1.0], 
+              ]; 
+            }
+
+            curr_pose = mul_matrix_matrix(curr_pose, T_v);
+
+            out_poses[link_idx] = curr_pose;
+          }
+
+
+        })// ; 
+      }); 
+
+      return out_poses;
+    }
 
     // todo: create a visualization that demonstrates your knowledge of forward kinematics on a robot model.
     // todo: The "default" assignment is to recreate this visualization:
@@ -37,13 +148,40 @@
     // if you want to use the XArm7 robot:
     let robot = new XArm7Robot();
 
-    // or, if you want to use the B1Z1 robot, comment the previous robot and uncomment this line:
-    // let robot = new B1Z1Robot();
-
     // this will spawn all of the robot's links at the origin
     robot.spawn_robot(engine);
 
+    let settings = {
+        mesh_visible: false,
+        draw_points: true,
+        wireframe_visible: true,
+        dof0: 0, 
+        dof1: 0, 
+        dof2: 0, 
+        dof3: 0, 
+        dof4: 0, 
+        dof5: 0, 
+        dof6: 0, 
+        dof7: 0, 
+    }
+    
+
+    let gui = get_default_lil_gui();
+    let dofs = gui.addFolder('DOFs');
+    dofs.add(settings, 'dof0', 0.0, 0.7).name('dof0');
+    dofs.add(settings, 'dof1', -2 * Math.PI, 2 * Math.PI).name('dof1');
+    dofs.add(settings, 'dof2', -2.0, 2.0).name('dof2');
+    dofs.add(settings, 'dof3', -2 * Math.PI, 2 * Math.PI).name('dof3');
+    dofs.add(settings, 'dof4', -0.19198, 3.927).name('dof4');
+    dofs.add(settings, 'dof5', -2 * Math.PI, 2 * Math.PI).name('dof5');
+    dofs.add(settings, 'dof6', -1.69297, Math.PI).name('dof6');
+    dofs.add(settings, 'dof7', -2 * Math.PI, 2 * Math.PI).name('dof7');
+
     engine.animation_loop( ()  => {
+      let se3_mats = forward_kinematics(robot, settings_to_state(settings));
+      for (let i = 0; i < robot.links.length; i++) {
+        robot.set_link_mesh_pose_from_SE3_matrix(engine, i, se3_mats[i]); 
+      }
 
     });
 
